@@ -5,6 +5,7 @@ Run a [Hermes Agent](https://hermes-agent.nousresearch.com) Telegram bot on EC2 
 A chat agent that's "always on" is mostly just always billing you. CloudWatch alarms tell you you're bleeding; they don't stop it. This stack adds teeth:
 
 - **Idle kill switch** — greps the gateway log for inbound Telegram messages every 60 seconds. No human has talked to the bot for 10 minutes? It publishes an SNS notice and shuts the instance down.
+- **Nightly graceful shutdown** — a scheduled Lambda stops `hermes.service` over SSM, waits for it to exit, then stops the instance. Runs even if you forgot the bot existed; every outcome lands in your inbox via SNS.
 - **Budget hard stop** — an AWS Budgets action that stops the instance when your monthly spend crosses the limit, regardless of idle state.
 - **Billing alarm** — email when estimated charges cross a threshold.
 - **No open ports** — zero inbound security group rules. Everything runs through SSM Session Manager.

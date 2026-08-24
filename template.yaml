@@ -31,6 +31,10 @@ Parameters:
     Default: 10
     MinValue: 1
     Description: Minutes of Telegram inactivity before the instance stops itself.
+  DailyShutdownSchedule:
+    Type: String
+    Default: 'cron(0 5 * * ? *)'
+    Description: UTC cron for the nightly graceful shutdown (default 05:00 UTC). Disable the rule after deploy if you don't want it.
   BudgetLimitUsd:
     Type: Number
     Default: 10
@@ -285,6 +289,139 @@ Resources:
           Region: !Ref AWS::Region
           InstanceIds:
             - !Ref HermesInstance
+
+  HermesShutdownRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GracefulHermesStop
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: '*'
+              - Effect: Allow
+                Action: ec2:StopInstances
+                Resource: !GetAtt HermesInstance.Arn
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !GetAtt HermesInstance.Arn
+                  - !Sub 'arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript'
+              - Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: '*'
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref BillingTopic
+
+  HermesDailyShutdown:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-daily-shutdown'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 128
+      Role: !GetAtt HermesShutdownRole.Arn
+      Environment:
+        Variables:
+          INSTANCE_ID: !Ref HermesInstance
+          SNS_TOPIC_ARN: !Ref BillingTopic
+      Code:
+        ZipFile: |
+          import boto3
+          import time
+          import os
+
+          ec2 = boto3.client("ec2")
+          ssm = boto3.client("ssm")
+          sns = boto3.client("sns")
+
+          INSTANCE_ID = os.environ["INSTANCE_ID"]
+          SNS_TOPIC_ARN = os.environ["SNS_TOPIC_ARN"]
+
+
+          def lambda_handler(event, context):
+              try:
+                  resp = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
+                  state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
+
+                  if state != "running":
+                      notify(f"Hermes instance is '{state}', no action taken.")
+                      return {"statusCode": 200, "body": f"Instance already {state}"}
+
+                  cmd = ssm.send_command(
+                      InstanceIds=[INSTANCE_ID],
+                      DocumentName="AWS-RunShellScript",
+                      Parameters={"commands": ["systemctl stop hermes.service"]},
+                      TimeoutSeconds=60,
+                  )
+                  cmd_id = cmd["Command"]["CommandId"]
+
+                  status = "Invoked"
+                  result = {}
+                  for _ in range(12):
+                      time.sleep(5)
+                      result = ssm.get_command_invocation(
+                          CommandId=cmd_id, InstanceId=INSTANCE_ID
+                      )
+                      status = result["Status"]
+                      if status in ("Success", "Failed", "Cancelled", "TimedOut"):
+                          break
+
+                  if status == "Success":
+                      ec2.stop_instances(InstanceIds=[INSTANCE_ID])
+                      notify("Hermes stopped gracefully. EC2 instance is shutting down.")
+                  elif status in ("Failed", "TimedOut"):
+                      error_msg = result.get("StandardErrorContent", "Unknown error")
+                      ec2.stop_instances(InstanceIds=[INSTANCE_ID])
+                      notify(
+                          f"WARNING: Hermes service stop returned '{status}'. "
+                          f"Instance still stopped. Error:\n{error_msg}"
+                      )
+                  else:
+                      notify(
+                          f"WARNING: Hermes service stop still '{status}' after 60s. "
+                          f"Instance not stopped — manual intervention needed."
+                      )
+
+              except Exception as e:
+                  notify(f"ERROR during Hermes shutdown: {str(e)}")
+                  raise
+
+
+          def notify(message):
+              sns.publish(
+                  TopicArn=SNS_TOPIC_ARN,
+                  Subject="Hermes Agent — Daily Shutdown",
+                  Message=message,
+              )
+
+  DailyShutdownRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: !Ref DailyShutdownSchedule
+      State: ENABLED
+      Targets:
+        - Id: hermes-daily-shutdown
+          Arn: !GetAtt HermesDailyShutdown.Arn
+
+  DailyShutdownInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HermesDailyShutdown
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyShutdownRule.Arn
 
 Outputs:
   InstanceId:
