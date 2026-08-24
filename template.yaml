@@ -1,0 +1,298 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Run NousResearch Hermes Agent on EC2 with SSM access, email billing alerts,
+  and an automatic EC2 stop when the monthly AWS budget is exceeded.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.small
+  HermesEnvSecretArn:
+    Type: String
+    Description: Secrets Manager ARN containing dotenv-formatted secrets, including TELEGRAM_BOT_TOKEN.
+  HermesAuthSecretArn:
+    Type: String
+    Description: Secrets Manager ARN containing the contents of the local Hermes ~/.hermes/auth.json.
+  HermesConfigSecretArn:
+    Type: String
+    Description: Secrets Manager ARN containing the contents of the local Hermes ~/.hermes/config.yaml.
+  AlertEmail:
+    Type: String
+    Description: Address that must confirm the SNS subscription.
+  EnableIdleShutdown:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Stop the instance automatically after IdleTimeoutMinutes with no inbound Telegram messages.
+  IdleTimeoutMinutes:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    Description: Minutes of Telegram inactivity before the instance stops itself.
+  BudgetLimitUsd:
+    Type: Number
+    Default: 10
+    MinValue: 0.01
+    Description: Monthly account-wide USD budget. The EC2 instance is stopped automatically at this amount.
+  BillingAlarmThresholdUsd:
+    Type: Number
+    Default: 10
+    MinValue: 0.01
+    Description: Monthly account-wide USD threshold for the CloudWatch billing alarm.
+
+Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: No inbound access; administer Hermes through SSM
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-hermes'
+
+  HermesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ReadHermesSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref HermesEnvSecretArn
+                  - !Ref HermesAuthSecretArn
+                  - !Ref HermesConfigSecretArn
+
+  HermesInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref HermesRole
+
+  HermesInstance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT20M
+    Properties:
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: !Ref InstanceType
+      SecurityGroupIds:
+        - !GetAtt InstanceSecurityGroup.GroupId
+      IamInstanceProfile: !Ref HermesInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-hermes'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          dnf install -y awscli-2 git tar xz libatomic gcc-c++ make
+          useradd --create-home --shell /bin/bash hermes || true
+          install -d -o hermes -g hermes /home/hermes/.hermes
+
+          runuser -u hermes -- bash -lc 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-browser --non-interactive'
+          runuser -u hermes -- bash -lc 'mkdir -p ~/.hermes && aws secretsmanager get-secret-value --secret-id ${HermesEnvSecretArn} --query SecretString --output text > ~/.hermes/.env && chmod 600 ~/.hermes/.env'
+          runuser -u hermes -- bash -lc 'aws secretsmanager get-secret-value --secret-id ${HermesAuthSecretArn} --query SecretString --output text > ~/.hermes/auth.json && chmod 600 ~/.hermes/auth.json'
+          runuser -u hermes -- bash -lc 'aws secretsmanager get-secret-value --secret-id ${HermesConfigSecretArn} --query SecretString --output text > ~/.hermes/config.yaml && chmod 600 ~/.hermes/config.yaml'
+
+          cat > /etc/systemd/system/hermes.service <<'SERVICE'
+          [Unit]
+          Description=Hermes Agent gateway
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          User=hermes
+          WorkingDirectory=/home/hermes
+          Environment=HOME=/home/hermes
+          Environment=HERMES_HOME=/home/hermes/.hermes
+          ExecStart=/home/hermes/.local/bin/hermes gateway
+          Restart=on-failure
+          RestartSec=10
+          NoNewPrivileges=true
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+          systemctl daemon-reload
+          systemctl enable --now hermes.service
+
+          # ── Idle shutdown monitor ──────────────────────────────────────────
+          cat > /home/hermes/check-idle.sh <<'IDLESCRIPT'
+          #!/usr/bin/env bash
+          # Idle shutdown monitor — greps gateway.log for real Telegram messages.
+          # Publishes to SNS then shuts down if no inbound messages for IDLE_MINUTES.
+          set -euo pipefail
+
+          IDLE_MINUTES=${IdleTimeoutMinutes}
+          HERMES_DIR="/home/hermes/.hermes"
+          LOGFILE="$HERMES_DIR/gateway.log"
+          SNS_TOPIC="${BillingTopic}"
+          OVERRIDE_FILE="/home/hermes/.idle-shutdown-disabled"
+
+          if [[ -f "$OVERRIDE_FILE" ]]; then
+            exit 0
+          fi
+
+          if [[ ! -f "$LOGFILE" ]]; then
+            exit 0
+          fi
+
+          last_line=$(grep "inbound message" "$LOGFILE" | tail -1)
+          if [[ -z "$last_line" ]]; then
+            exit 0
+          fi
+
+          ts=$(echo "$last_line" | cut -d' ' -f1-2)
+          ts_clean=$(echo "$ts" | sed 's/,.*//')
+          last_epoch=$(date -d "$ts_clean" +%s 2>/dev/null) || exit 0
+          now_epoch=$(date +%s)
+          diff=$(( now_epoch - last_epoch ))
+          idle_limit=$(( IDLE_MINUTES * 60 ))
+
+          logger -t hermes-idle "Last message $(( diff / 60 ))m ago"
+
+          if [[ $diff -ge $idle_limit ]]; then
+            logger -t hermes-idle "Idle for $(( diff / 60 ))m — shutting down"
+            aws sns publish --region ${AWS::Region} --topic-arn "$SNS_TOPIC" \
+              --subject "Hermes idle shutdown" \
+              --message "Hermes idle for $(( diff / 60 ))m. Instance $(curl -s http://169.254.169.254/latest/meta-data/instance-id) shutting down."
+            shutdown -h now
+          fi
+          IDLESCRIPT
+          chmod +x /home/hermes/check-idle.sh
+          chown hermes:hermes /home/hermes/check-idle.sh
+          if [[ "${EnableIdleShutdown}" != "true" ]]; then touch /home/hermes/.idle-shutdown-disabled; fi
+
+          cat > /etc/systemd/system/hermes-idle-check.service <<'IDLESVC'
+          [Unit]
+          Description=Hermes idle shutdown monitor
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/home/hermes/check-idle.sh
+          IDLESVC
+
+          cat > /etc/systemd/system/hermes-idle-check.timer <<'IDLETIMER'
+          [Unit]
+          Description=Run Hermes idle check every 60s
+
+          [Timer]
+          OnBootSec=120
+          OnUnitActiveSec=60
+
+          [Install]
+          WantedBy=timers.target
+          IDLETIMER
+
+          systemctl daemon-reload
+          systemctl enable --now hermes-idle-check.timer
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource HermesInstance --region ${AWS::Region}
+
+  BillingTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-billing-alerts'
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  BillingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub 'Account estimated charges exceeded ${BillingAlarmThresholdUsd} USD. Billing metrics are month-to-date.'
+      Namespace: AWS/Billing
+      MetricName: EstimatedCharges
+      Dimensions:
+        - Name: Currency
+          Value: USD
+      Statistic: Maximum
+      Period: 21600
+      EvaluationPeriods: 1
+      Threshold: !Ref BillingAlarmThresholdUsd
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+      AlarmActions:
+        - !Ref BillingTopic
+
+  Budget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub '${AWS::StackName}-monthly'
+        BudgetLimit:
+          Amount: !Ref BudgetLimitUsd
+          Unit: USD
+        BudgetType: COST
+        TimeUnit: MONTHLY
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BillingTopic
+
+  BudgetActionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSBudgetsActionsWithAWSResourceControlAccess
+
+  StopHermesAtBudget:
+    Type: AWS::Budgets::BudgetsAction
+    DependsOn: Budget
+    Properties:
+      BudgetName: !Sub '${AWS::StackName}-monthly'
+      ActionType: RUN_SSM_DOCUMENTS
+      ApprovalModel: AUTOMATIC
+      ExecutionRoleArn: !GetAtt BudgetActionRole.Arn
+      ActionThreshold:
+        Value: 100
+        Type: PERCENTAGE
+      NotificationType: ACTUAL
+      Subscribers:
+        - Type: SNS
+          Address: !Ref BillingTopic
+      Definition:
+        SsmActionDefinition:
+          Subtype: STOP_EC2_INSTANCES
+          Region: !Ref AWS::Region
+          InstanceIds:
+            - !Ref HermesInstance
+
+Outputs:
+  InstanceId:
+    Value: !Ref HermesInstance
+  SsmConnect:
+    Value: !Sub 'aws ssm start-session --target ${HermesInstance}'
+  BillingTopicArn:
+    Value: !Ref BillingTopic
+  BillingAlarmRegion:
+    Value: !Ref AWS::Region
+    Description: Deploy this stack in us-east-1 for the AWS/Billing metric alarm.
