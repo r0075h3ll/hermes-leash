@@ -31,14 +31,14 @@ if [ ! -f "$HERMES_LOG" ]; then
   exit 0
 fi
 
-LAST_MSG=$(grep "inbound message" "$HERMES_LOG" 2>/dev/null | tail -1 | cut -d' ' -f1-2 | sed 's/,.*//')
+LAST_MSG=$(grep "inbound message" "$HERMES_LOG" 2>/dev/null | tail -1 | cut -d' ' -f1-2 | sed 's/,.*//' || true)
 
 if [ -z "$LAST_MSG" ]; then
   log "No inbound messages ever received. Staying up for safety."
   exit 0
 fi
 
-LAST_EPOCH=$(date -d "$LAST_MSG" +%s 2>/dev/null || echo 0)
+LAST_EPOCH=$(date -d "$LAST_MSG" +%s 2>/dev/null) || { log "Unparseable timestamp '$LAST_MSG'. Staying up."; exit 0; }
 NOW_EPOCH=$(date +%s)
 DIFF=$(( (NOW_EPOCH - LAST_EPOCH) / 60 ))
 

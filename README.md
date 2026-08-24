@@ -26,11 +26,11 @@ scripts/check-idle.sh  standalone copy of the idle monitor
 
    ```bash
    aws secretsmanager create-secret --region us-east-1 --name hermes-agent-env \
-     --secret-string file://~/.hermes/.env
+     --secret-string file://$HOME/.hermes/.env
    aws secretsmanager create-secret --region us-east-1 --name hermes-agent-auth \
-     --secret-string file://~/.hermes/auth.json
+     --secret-string file://$HOME/.hermes/auth.json
    aws secretsmanager create-secret --region us-east-1 --name hermes-agent-config \
-     --secret-string file://~/.hermes/config.yaml
+     --secret-string file://$HOME/.hermes/config.yaml
    ```
 
    `.env` needs your `TELEGRAM_BOT_TOKEN`. `auth.json` is your Hermes login; never commit or paste its contents anywhere.

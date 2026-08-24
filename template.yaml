@@ -78,6 +78,13 @@ Resources:
                   - !Ref HermesEnvSecretArn
                   - !Ref HermesAuthSecretArn
                   - !Ref HermesConfigSecretArn
+        - PolicyName: PublishIdleShutdownNotice
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref BillingTopic
 
   HermesInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -144,8 +151,7 @@ Resources:
           set -euo pipefail
 
           IDLE_MINUTES=${IdleTimeoutMinutes}
-          HERMES_DIR="/home/hermes/.hermes"
-          LOGFILE="$HERMES_DIR/gateway.log"
+          LOGFILE="/home/hermes/.hermes/logs/gateway.log"
           SNS_TOPIC="${BillingTopic}"
           OVERRIDE_FILE="/home/hermes/.idle-shutdown-disabled"
 
@@ -157,7 +163,7 @@ Resources:
             exit 0
           fi
 
-          last_line=$(grep "inbound message" "$LOGFILE" | tail -1)
+          last_line=$(grep "inbound message" "$LOGFILE" | tail -1 || true)
           if [[ -z "$last_line" ]]; then
             exit 0
           fi
@@ -175,7 +181,7 @@ Resources:
             logger -t hermes-idle "Idle for $(( diff / 60 ))m — shutting down"
             aws sns publish --region ${AWS::Region} --topic-arn "$SNS_TOPIC" \
               --subject "Hermes idle shutdown" \
-              --message "Hermes idle for $(( diff / 60 ))m. Instance $(curl -s http://169.254.169.254/latest/meta-data/instance-id) shutting down."
+              --message "Hermes idle for $(( diff / 60 ))m. Instance shutting down." || true
             shutdown -h now
           fi
           IDLESCRIPT
@@ -217,6 +223,21 @@ Resources:
       Subscription:
         - Protocol: email
           Endpoint: !Ref AlertEmail
+
+  BillingTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref BillingTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowBudgetsPublish
+            Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref BillingTopic
 
   BillingAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -311,11 +332,11 @@ Resources:
                 Resource: '*'
               - Effect: Allow
                 Action: ec2:StopInstances
-                Resource: !GetAtt HermesInstance.Arn
+                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${HermesInstance}'
               - Effect: Allow
                 Action: ssm:SendCommand
                 Resource:
-                  - !GetAtt HermesInstance.Arn
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${HermesInstance}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript'
               - Effect: Allow
                 Action: ssm:GetCommandInvocation
