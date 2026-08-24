@@ -1,14 +1,14 @@
 # hermes-leash
 
-Run a [Hermes Agent](https://hermes-agent.nousresearch.com) Telegram bot on EC2 without it quietly eating your credit card.
+Run a [Hermes Agent](https://hermes-agent.nousresearch.com) Telegram bot on EC2 without it eating your credit card.
 
-A chat agent that's "always on" is mostly just always billing you. CloudWatch alarms tell you you're bleeding; they don't stop it. This stack adds teeth:
+A chat agent that's "always on" bills you whether anyone talks to it or not. CloudWatch alarms report spend after it happens. This stack stops the instance instead:
 
-- **Idle kill switch** — greps the gateway log for inbound Telegram messages every 60 seconds. No human has talked to the bot for 10 minutes? It publishes an SNS notice and shuts the instance down.
-- **Nightly graceful shutdown** — a scheduled Lambda stops `hermes.service` over SSM, waits for it to exit, then stops the instance. Runs even if you forgot the bot existed; every outcome lands in your inbox via SNS.
-- **Budget hard stop** — an AWS Budgets action that stops the instance when your monthly spend crosses the limit, regardless of idle state.
-- **Billing alarm** — email when estimated charges cross a threshold.
-- **No open ports** — zero inbound security group rules. Everything runs through SSM Session Manager.
+- **Idle kill switch**: a systemd timer greps `gateway.log` for inbound Telegram messages every 60 seconds. After 10 minutes with no message it publishes an SNS notice and shuts the instance down.
+- **Nightly graceful shutdown**: a scheduled Lambda stops `hermes.service` over SSM, waits for it to exit, then stops the instance. You get an SNS email either way.
+- **Budget hard stop**: an AWS Budgets action stops the instance when monthly spend crosses your limit, regardless of idle state.
+- **Billing alarm**: email when estimated charges cross a threshold.
+- **No open ports**: zero inbound security group rules. Everything runs through SSM Session Manager.
 
 ## What's here
 
@@ -20,7 +20,7 @@ scripts/check-idle.sh  standalone copy of the idle monitor
 
 ## Before you deploy
 
-1. **Enable billing alerts** — AWS Console → Billing → Billing preferences → turn on *Receive CloudWatch Billing Alerts*. Billing metrics only exist in us-east-1, so that's where the alarm lives. They're month-to-date and delayed; treat them as a rough gauge, not a meter.
+1. **Enable billing alerts** — AWS Console → Billing → Billing preferences → turn on *Receive CloudWatch Billing Alerts*. Billing metrics only exist in us-east-1, so that's where the alarm lives. They're month-to-date and delayed, so treat them as approximate.
 
 2. **Get three secrets into Secrets Manager**, from whatever machine currently has Hermes configured:
 
@@ -33,7 +33,7 @@ scripts/check-idle.sh  standalone copy of the idle monitor
      --secret-string file://~/.hermes/config.yaml
    ```
 
-   `.env` needs your `TELEGRAM_BOT_TOKEN`. `auth.json` is your Hermes login — never commit or paste its contents anywhere.
+   `.env` needs your `TELEGRAM_BOT_TOKEN`. `auth.json` is your Hermes login; never commit or paste its contents anywhere.
 
    If a secret already exists, use `put-secret-value` instead.
 
@@ -102,16 +102,16 @@ scripts/hermes.sh ssh      # SSM session
 scripts/hermes.sh stop     # stops the service cleanly, then the instance
 ```
 
-Stopping manually is fine — the idle monitor is a backstop, not a requirement.
+Stopping manually is fine. The idle monitor exists as a backstop.
 
 ## How the idle check works
 
 Every 60 seconds a systemd timer runs `check-idle.sh`, which takes the last `inbound message` line from `gateway.log` and compares its timestamp to now. That's the only reliable activity signal: Hermes touches its own state files constantly, so mtimes never go stale and anything based on them never fires.
 
-Two deliberate safety rails: if the log shows no inbound messages *ever* (fresh instance), it stays up rather than shutting down immediately; and if the log file itself doesn't exist yet, it stays up.
+Two safety rails: an instance with no inbound messages ever (a fresh one) stays up, and so does one whose log file doesn't exist yet.
 
 ## Limits
 
 - The budget action stops this one instance. It will not touch anything else in the account.
-- Budget evaluation isn't instant — expect some overshoot past the threshold before the stop lands.
+- Budget evaluation isn't instant. Expect some overshoot past the threshold before the stop lands.
 - The idle monitor reads timestamps with GNU `date -d`; it assumes the AL2023 default locale/log format. If you change Hermes' log format, update the grep.

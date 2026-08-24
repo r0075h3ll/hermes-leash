@@ -3,7 +3,7 @@
 #
 # The CloudFormation template installs this with a systemd timer that fires
 # every 60 seconds. This standalone copy is handy if you run Hermes some other
-# way — set the env vars below and wire it into cron or a timer yourself.
+# way. Set the env vars below and wire it into cron or a timer yourself.
 #
 # Activity is measured by grepping the gateway log for "inbound message".
 # Internal state files change constantly even when nothing is happening,

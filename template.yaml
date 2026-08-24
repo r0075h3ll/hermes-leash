@@ -135,10 +135,11 @@ Resources:
           systemctl daemon-reload
           systemctl enable --now hermes.service
 
-          # ── Idle shutdown monitor ──────────────────────────────────────────
+          # Idle shutdown monitor: greps gateway.log for real Telegram messages.
+          # Publishes to SNS then shuts down if no inbound messages for IDLE_MINUTES.
           cat > /home/hermes/check-idle.sh <<'IDLESCRIPT'
           #!/usr/bin/env bash
-          # Idle shutdown monitor — greps gateway.log for real Telegram messages.
+          # Idle shutdown monitor: greps gateway.log for real Telegram messages.
           # Publishes to SNS then shuts down if no inbound messages for IDLE_MINUTES.
           set -euo pipefail
 
