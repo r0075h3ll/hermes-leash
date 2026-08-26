@@ -25,7 +25,7 @@ scripts/update-auth-secret.sh sync local auth.json to Secrets Manager and instan
 
 1. **Enable billing alerts** — AWS Console → Billing → Billing preferences → turn on *Receive CloudWatch Billing Alerts*. Billing metrics only exist in us-east-1, so that's where the alarm lives. They're month-to-date and delayed, so treat them as approximate.
 
-2. **Get three secrets into Secrets Manager**, from whatever machine currently has Hermes configured.
+2. **Get three secrets into Secrets Manager**, from whatever machine currently has Hermes configured:
 
    ```bash
    aws secretsmanager create-secret --region us-east-1 --name hermes-agent-env \
@@ -68,7 +68,7 @@ aws cloudformation deploy \
 
 The stack uses the account's default VPC (it must have outbound internet access). When it finishes, click the SNS confirmation email or you'll never see an alert.
 
-Then connect and check the gateway came up.
+Then connect and check the gateway came up:
 
 ```bash
 INSTANCE_ID=$(aws cloudformation describe-stacks --region us-east-1 --stack-name hermes-agent \
@@ -89,7 +89,7 @@ journalctl -u hermes -f
 | `IdleTimeoutMinutes` | `10` | Minutes of Telegram silence before auto-stop |
 | `EnableThreatFoxBlock` | `true` | Set `false` to deploy without the IOC firewall |
 
-The idle timer can also be disabled at runtime without redeploying.
+The idle timer can also be disabled at runtime without redeploying:
 
 ```bash
 touch /home/hermes/.idle-shutdown-disabled   # inside an SSM session
