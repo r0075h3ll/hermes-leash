@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTANCE_ID="${INSTANCE_ID:?Set INSTANCE_ID}"
-REGION="us-east-1"
-SECRET_ARN="${SECRET_ARN:?Set SECRET_ARN}"
+# Required: set via environment or CLI args
+INSTANCE_ID="${INSTANCE_ID:?Set INSTANCE_ID (e.g. INSTANCE_ID=i-xxx)}"
+SECRET_ARN="${SECRET_ARN:?Set SECRET_ARN (e.g. SECRET_ARN=arn:aws:secretsmanager:...)}"
+REGION="${REGION:-us-east-1}"
+
 LOCAL_AUTH_FILE="$HOME/.hermes/auth.json"
 REMOTE_AUTH_FILE="/home/hermes/.hermes/auth.json"
 
