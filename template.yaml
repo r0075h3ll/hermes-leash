@@ -132,6 +132,8 @@ Resources:
           Description=Hermes Agent gateway
           Wants=network-online.target
           After=network-online.target
+          StartLimitIntervalSec=300
+          StartLimitBurst=5
 
           [Service]
           User=hermes
@@ -141,8 +143,6 @@ Resources:
           ExecStart=/home/hermes/.local/bin/hermes gateway
           Restart=on-failure
           RestartSec=10
-          StartLimitIntervalSec=300
-          StartLimitBurst=5
           NoNewPrivileges=true
 
           [Install]
@@ -329,13 +329,13 @@ Resources:
           fi
 
           cat > /etc/logrotate.d/hermes <<'LOGROTATE'
-          /home/hermes/idle-monitor.log /var/log/threatfox-block.log {
+          /var/log/threatfox-block.log {
               weekly
               rotate 4
               compress
               missingok
               notifempty
-              create 0640 hermes hermes
+              create 0640 root root
           }
           LOGROTATE
 

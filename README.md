@@ -18,13 +18,14 @@ template.yaml                CloudFormation stack (the whole thing)
 scripts/hermes.sh            start/stop/status/ssh control from your laptop
 scripts/check-idle.sh        standalone copy of the idle monitor
 scripts/threatfox-block.sh   standalone copy of the IOC blocker
+scripts/update-auth-secret.sh sync local auth.json to Secrets Manager and instance
 ```
 
 ## Before you deploy
 
 1. **Enable billing alerts** — AWS Console → Billing → Billing preferences → turn on *Receive CloudWatch Billing Alerts*. Billing metrics only exist in us-east-1, so that's where the alarm lives. They're month-to-date and delayed, so treat them as approximate.
 
-2. **Get three secrets into Secrets Manager**, from whatever machine currently has Hermes configured.
+2. **Get three secrets into Secrets Manager**, from whatever machine currently has Hermes configured:
 
    ```bash
    aws secretsmanager create-secret --region us-east-1 --name hermes-agent-env \
@@ -67,7 +68,7 @@ aws cloudformation deploy \
 
 The stack uses the account's default VPC (it must have outbound internet access). When it finishes, click the SNS confirmation email or you'll never see an alert.
 
-Then connect and check the gateway came up.
+Then connect and check the gateway came up:
 
 ```bash
 INSTANCE_ID=$(aws cloudformation describe-stacks --region us-east-1 --stack-name hermes-agent \
@@ -88,7 +89,7 @@ journalctl -u hermes -f
 | `IdleTimeoutMinutes` | `10` | Minutes of Telegram silence before auto-stop |
 | `EnableThreatFoxBlock` | `true` | Set `false` to deploy without the IOC firewall |
 
-The idle timer can also be disabled at runtime without redeploying.
+The idle timer can also be disabled at runtime without redeploying:
 
 ```bash
 touch /home/hermes/.idle-shutdown-disabled   # inside an SSM session
@@ -119,13 +120,25 @@ Every 30 minutes, and once more right after boot, a systemd timer runs `threatfo
 
 Blocked IPs accumulate in `/var/lib/threatfox-block/blocked.txt` and never expire, so the list only grows. If the feed can't be fetched, the script re-applies the last known list instead of flushing the rules.
 
-Spot checks.
+Spot checks:
 
 ```bash
 sudo nft get element ip threatfox blocked { 1.2.3.4 }   # is this IP in the set?
 sudo journalctl -k -f | grep threatfox-block             # live view of attempted hits
 tail -5 /var/log/threatfox-block.log                     # refresh history
 ```
+
+## Syncing credentials
+
+If your local `~/.hermes/auth.json` gets updated (e.g., after re-authenticating), sync it to the running instance:
+
+```bash
+INSTANCE_ID=i-xxxxxxxxxxxxxxxxx \
+SECRET_ARN=arn:aws:secretsmanager:us-east-1:123456789012:secret:hermes-agent-auth-xxxxxx \
+./scripts/update-auth-secret.sh
+```
+
+This updates Secrets Manager and pushes the new credentials to the instance via SSM, then restarts hermes.service.
 
 ## Limits
 
