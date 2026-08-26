@@ -141,6 +141,8 @@ Resources:
           ExecStart=/home/hermes/.local/bin/hermes gateway
           Restart=on-failure
           RestartSec=10
+          StartLimitIntervalSec=300
+          StartLimitBurst=5
           NoNewPrivileges=true
 
           [Install]
@@ -244,8 +246,8 @@ Resources:
           trap 'rm -f "$TMP" "$TMP.new" "$TMP.add"' EXIT
 
           if curl -fsSL --max-time 60 "$FEED_URL" > "$TMP"; then
-            jq -r '.[][] |
-              select(.confidence_level >= 80 and (.ioc_type == "ip" or .ioc_type == "ip:port")) |
+            jq -r --argjson min_conf "$MIN_CONF" '.[][] |
+              select(.confidence_level >= $min_conf and (.ioc_type == "ip" or .ioc_type == "ip:port")) |
               .ioc_value' "$TMP" \
               | sed -E 's/^([0-9.]+):[0-9]+$/\1/' \
               | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -326,7 +328,18 @@ Resources:
           /usr/local/bin/threatfox-block.sh || logger -t threatfox-block "bootstrap run failed; timer will retry"
           fi
 
-          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource HermesInstance --region ${AWS::Region}
+          cat > /etc/logrotate.d/hermes <<'LOGROTATE'
+          /home/hermes/idle-monitor.log /var/log/threatfox-block.log {
+              weekly
+              rotate 4
+              compress
+              missingok
+              notifempty
+              create 0640 hermes hermes
+          }
+          LOGROTATE
+
+          /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource HermesInstance --region ${AWS::Region}
 
   BillingTopic:
     Type: AWS::SNS::Topic
@@ -380,6 +393,22 @@ Resources:
         BudgetType: COST
         TimeUnit: MONTHLY
       NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BillingTopic
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 90
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BillingTopic
         - Notification:
             NotificationType: ACTUAL
             ComparisonOperator: GREATER_THAN
