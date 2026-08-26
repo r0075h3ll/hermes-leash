@@ -20,8 +20,8 @@ TMP=$(mktemp)
 trap 'rm -f "$TMP" "$TMP.new" "$TMP.add"' EXIT
 
 if curl -fsSL --max-time 60 "$FEED_URL" > "$TMP"; then
-  jq -r '.[][] |
-    select(.confidence_level >= 80 and (.ioc_type == "ip" or .ioc_type == "ip:port")) |
+  jq -r --argjson min_conf "$MIN_CONF" '.[][] |
+    select(.confidence_level >= $min_conf and (.ioc_type == "ip" or .ioc_type == "ip:port")) |
     .ioc_value' "$TMP" \
     | sed -E 's/^([0-9.]+):[0-9]+$/\1/' \
     | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
