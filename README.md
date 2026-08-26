@@ -120,7 +120,7 @@ Every 30 minutes, and once more right after boot, a systemd timer runs `threatfo
 
 Blocked IPs accumulate in `/var/lib/threatfox-block/blocked.txt` and never expire, so the list only grows. If the feed can't be fetched, the script re-applies the last known list instead of flushing the rules.
 
-Spot checks.
+Spot checks:
 
 ```bash
 sudo nft get element ip threatfox blocked { 1.2.3.4 }   # is this IP in the set?
